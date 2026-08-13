@@ -72,6 +72,12 @@ class VendorPriceOffer(BaseModel):
     price: float
 
 
+class SameProductNameQty(BaseModel):
+    item_id: str
+    description: str
+    qty: float
+
+
 class SalesPoint(BaseModel):
     date: str
     qty: float
@@ -105,6 +111,13 @@ class DetectOrderItem(BaseModel):
     same_item_brand_count: int = Field(
         0,
         description="How many brand SKUs of this same item are in stock (incl. this line); 0 if alone",
+    )
+    same_product_name_qty: list[SameProductNameQty] = Field(
+        default_factory=list,
+        description=(
+            "Other products sharing this line's exact products.product_name, "
+            "with each one's current on-hand qty."
+        ),
     )
     other_vendor_prices: list[VendorPriceOffer] = Field(
         default_factory=list,

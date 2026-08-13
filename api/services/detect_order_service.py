@@ -34,7 +34,7 @@ from v2.forecasting.global_lightgbm_predictor import (
     forecast_batch as lgbm_forecast_batch,
     model_ready as lgbm_model_ready,
 )
-from v2.products.same_item_brands import build_other_brands_map
+from v2.products.same_item_brands import build_other_brands_map, build_same_product_name_map
 
 
 def _ads_lookback_days() -> float:
@@ -273,7 +273,9 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
     item_ids = [str(it["item_id"]) for it in raw_items]
     available_map = repo.fetch_available_stock(item_ids)
     other_vendor_prices = repo.fetch_all_vendor_prices(item_ids)
-    other_brands_by_item = build_other_brands_map(repo.fetch_all_products_on_hand())
+    all_products_on_hand = repo.fetch_all_products_on_hand()
+    other_brands_by_item = build_other_brands_map(all_products_on_hand)
+    same_product_name_by_item = build_same_product_name_map(all_products_on_hand)
     # Warm ADS/std once for the whole catalog
     demand_stats = store.get_demand_stats(item_ids)
     # Longer history for LightGBM lags (56d) + rolling windows
@@ -471,6 +473,7 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             same_item_brand_count=int(
                 (other_brands_by_item.get(item_id) or {}).get("same_item_brand_count") or 0
             ),
+            same_product_name_qty=same_product_name_by_item.get(item_id) or [],
             other_vendor_prices=offers,
             cheaper_elsewhere=bool(cheapest_offer),
             cheapest_vendor=cheapest_offer,

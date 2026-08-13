@@ -134,3 +134,38 @@ def build_other_brands_map(
             "same_item_brand_count": brand_count,
         }
     return out
+
+
+def build_same_product_name_map(
+    catalog: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """
+    Group by exact products.product_name (not the fuzzy brand-stripped signature above).
+
+    From full product catalog rows ({item_id, product_name, description, quantity}),
+    return per item_id: the other rows sharing the same product_name, each as
+    {item_id, description, qty}.
+    """
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for row in catalog:
+        name = str(row.get("product_name") or "").strip()
+        if not name:
+            continue
+        by_name.setdefault(name.upper(), []).append(row)
+
+    out: dict[str, list[dict[str, Any]]] = {}
+    for rows in by_name.values():
+        for row in rows:
+            item_id = str(row.get("item_id") or "").strip()
+            if not item_id:
+                continue
+            out[item_id] = [
+                {
+                    "item_id": str(r.get("item_id") or ""),
+                    "description": str(r.get("description") or ""),
+                    "qty": float(r.get("quantity") or 0.0),
+                }
+                for r in rows
+                if str(r.get("item_id") or "") != item_id
+            ]
+    return out

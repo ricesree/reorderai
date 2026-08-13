@@ -448,6 +448,7 @@ class DetectOrderRepository:
                 SELECT
                   p.id::text AS item_id,
                   p.name AS description,
+                  p.product_name AS product_name,
                   (
                     SELECT pb.barcode
                     FROM {sch}.product_barcodes pb
@@ -474,6 +475,7 @@ class DetectOrderRepository:
             {
                 "item_id": str(r.item_id),
                 "description": str(r.description or ""),
+                "product_name": str(r.product_name or "") if r.product_name is not None else "",
                 "upc": str(r.upc or "") if r.upc is not None else "",
                 "quantity": float(r.quantity or 0.0),
             }

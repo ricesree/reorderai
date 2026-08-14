@@ -572,8 +572,8 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
 
     order_lines = [x for x in lines if x.qty_to_order > 0]
     watch_lines = [x for x in lines if x.line_action == "WATCH"]
-    # Always return actionable lines only (ORDER + WATCH). SKIP / zero lines omitted.
-    out_items = [x for x in lines if x.line_action in ("ORDER", "WATCH")]
+    # Return the full vendor catalog (ORDER + WATCH + SKIP), not just actionable lines.
+    out_items = lines
     total_units = round(sum(x.qty_to_order for x in order_lines), 2)
     total_cases = round(sum(x.cases_to_order for x in order_lines), 2)
 

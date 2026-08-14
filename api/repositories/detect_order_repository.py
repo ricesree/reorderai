@@ -271,11 +271,13 @@ class DetectOrderRepository:
         except Exception:
             return {}
         out: dict[str, float] = {}
-        today = pd.Timestamp.utcnow().normalize()
+        today = pd.Timestamp.utcnow().tz_localize(None).normalize()
         for r in df.itertuples(index=False):
             exp = pd.to_datetime(r.soonest_exp, errors="coerce")
             if pd.isna(exp):
                 continue
+            if exp.tzinfo is not None:
+                exp = exp.tz_localize(None)
             days = (exp.normalize() - today).days
             out[str(int(r.product_id))] = float(max(days, 0))
         return out

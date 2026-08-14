@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 
 class ProductEnrichRequest(BaseModel):
+    tenant_id: str | None = None
     id: int | None = None
     limit: int | None = None
 

@@ -353,9 +353,15 @@ class DetectOrderRepository:
             )
         return out
 
+    # Location types that don't count as sellable on-hand stock (mirrors the main
+    # app's excludeReturnsLocations/excludeVirtualLocations/excludePackingLocations
+    # + scrape scopes).
+    _EXCLUDED_LOCATION_TYPES = ("returns", "virtual", "scrape", "packing")
+
     def fetch_available_stock(self, item_ids: list[str]) -> dict[str, float]:
         """Step 2 — sum on-hand qty from product_locations (raw; negatives allowed).
 
+        Excludes returns / virtual / scrape / packing locations (not sellable stock).
         Detect-order keeps negatives on the line (oversold). Order math floors at 0
         and counts |OH| toward sold / ADS.
         """
@@ -375,12 +381,14 @@ class DetectOrderRepository:
         sch = q_ident(self.schema)
         ids = [int(x) for x in item_ids]
         id_csv = ",".join(str(i) for i in ids)
+        excluded_csv = ",".join(f"'{t}'" for t in self._EXCLUDED_LOCATION_TYPES)
         df = self._conn().read_sql(
             f"""
             SELECT product_id, COALESCE(SUM(quantity), 0) AS qty
             FROM {sch}.product_locations
             WHERE deleted_at IS NULL
               AND product_id IN ({id_csv})
+              AND COALESCE(location_type, '') NOT IN ({excluded_csv})
             GROUP BY product_id
             """
         )
@@ -412,7 +420,10 @@ class DetectOrderRepository:
         }
 
     def _fetch_location_max_quantity(self, item_ids: list[int]) -> dict[str, float]:
-        """Sum of location max_quantity per product across all locations (anti-overstock cap)."""
+        """Sum of location max_quantity per product, storage + picking locations only
+
+        (anti-overstock cap — shown in the API/UI as stock_capacity / wecomm_max_on_hand).
+        """
         if not item_ids:
             return {}
         sch = q_ident(self.schema)
@@ -426,6 +437,7 @@ class DetectOrderRepository:
                   AND product_id IN ({id_csv})
                   AND max_quantity IS NOT NULL
                   AND max_quantity > 0
+                  AND location_type IN ('storage', 'picking')
                 GROUP BY product_id
                 """
             )
@@ -461,6 +473,7 @@ class DetectOrderRepository:
                     FROM {sch}.product_locations pl
                     WHERE pl.product_id = p.id
                       AND pl.deleted_at IS NULL
+                      AND COALESCE(pl.location_type, '') NOT IN ('returns', 'virtual', 'scrape', 'packing')
                   ), 0) AS quantity
                 FROM {sch}.products p
                 WHERE p.deleted_at IS NULL

@@ -19,5 +19,8 @@ def enrich_products(body: ProductEnrichRequest) -> dict:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"LLM enrichment failed: {exc}") from exc
-    result = service.enrich_missing(limit=body.limit)
+    try:
+        result = service.enrich_missing(limit=body.limit)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Enrichment batch failed: {exc}") from exc
     return ProductEnrichBatchResponse(**result).model_dump()

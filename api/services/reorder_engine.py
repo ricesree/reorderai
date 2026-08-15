@@ -207,14 +207,12 @@ def compute_line_reorder(
         if stock_at_arrival >= wecomm_max:
             desired = _ceil_units(stock_at_arrival)  # raw need → 0
 
-    # ML reference (full X)
-    if eff <= 0:
-        p50_x = 0.0
-        p90_x = 0.0
-    else:
-        h = int(max(round(eff), 1))
-        p50_x = scale_forecast(p50_full, stored_horizon, h)
-        p90_x = scale_forecast(p90_full, stored_horizon, h)
+    # ML reference (full X) — always the real model forecast over the full requested
+    # window, independent of expiry-capping. Expiry only shrinks the order QUANTITY
+    # (cover_eff below), not the reference sales prediction shown to the buyer.
+    h = int(max(round(float(x)), 1))
+    p50_x = scale_forecast(p50_full, stored_horizon, h)
+    p90_x = scale_forecast(p90_full, stored_horizon, h)
 
     if cover_eff > 0 and has_demand:
         cover_h = int(max(round(cover_eff), 1))

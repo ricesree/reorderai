@@ -9,12 +9,15 @@ back immediately (so a mid-batch failure keeps prior progress).
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
 from openai import OpenAI
 
 from api.repositories.product_repository import ProductRepository
+
+logger = logging.getLogger(__name__)
 
 _MODEL = "gpt-4o-mini"
 
@@ -67,13 +70,17 @@ def enrich_one(product_id: int, tenant_id: str | None = None) -> dict[str, Any]:
 def enrich_missing(tenant_id: str | None = None, limit: int | None = None) -> dict[str, Any]:
     repo = ProductRepository(tenant_id)
     rows = repo.find_missing(limit=limit)
+    logger.info("enrich_missing: tenant=%s starting, %d product(s) to process", tenant_id, len(rows))
     updated: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
-    for row in rows:
+    for i, row in enumerate(rows, start=1):
         try:
             fields = enrich_from_name(str(row["slug"]))
             repo.update_fields(row["id"], **fields)
             updated.append({"id": row["id"], **fields})
+            logger.info("enrich_missing: [%d/%d] id=%s ok", i, len(rows), row["id"])
         except Exception as exc:  # noqa: BLE001 - one bad item must not kill the batch
             failed.append({"id": row["id"], "error": str(exc)})
+            logger.warning("enrich_missing: [%d/%d] id=%s failed: %s", i, len(rows), row["id"], exc)
+    logger.info("enrich_missing: tenant=%s done, updated=%d failed=%d", tenant_id, len(updated), len(failed))
     return {"updated": len(updated), "items": updated, "failed": failed}

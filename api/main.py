@@ -6,6 +6,7 @@ Reorder AI API — detect-order, forecast_store, chatbot.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -14,13 +15,15 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 load_dotenv(ROOT / ".env", override=True)
 
-from api.routes import chatbot, detect_order, products, system  # noqa: E402
+from api.routes import chatbot, detect_order, invoice_agent_queue, products, system  # noqa: E402
 
 app = FastAPI(
     title="Reorder AI",
@@ -42,6 +45,7 @@ app.include_router(system.router)
 app.include_router(detect_order.router)
 app.include_router(chatbot.router)
 app.include_router(products.router)
+app.include_router(invoice_agent_queue.router)
 
 
 @app.get("/")
@@ -61,6 +65,8 @@ async def root() -> dict:
             "chatbot_ask": "POST /api/chatbot/ask",
             "chatbot_tool": "POST /api/chatbot/tool",
             "products_enrich": "POST /api/products/enrich",
+            "parse_invoice": "POST /api/invoice-agent/parse-invoice",
+            "parse_invoice_status": "GET /api/invoice-agent/parse-invoice/status/{job_id}",
             "nightly_batch": "python scripts/run_nightly_forecast.py",
         },
     }

@@ -23,3 +23,6 @@ Thumbs.db
 data/**
 !data/**/.gitkeep
 !data/README.md
+
+# invoice_agent — generated parse output, not source
+invoice_agent/results/

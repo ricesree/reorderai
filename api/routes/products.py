@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from api.schemas.product_enrichment import ProductEnrichRequest
 from api.services import enrich_queue
@@ -35,3 +35,12 @@ def enrich_status(job_id: str) -> dict:
     if status is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     return status
+
+
+@router.get("/enrich/status")
+def enrich_status_by_tenant(tenant_id: str | None = Query(default=None)) -> dict:
+    job_id = enrich_queue.get_last_job_id(tenant_id)
+    if job_id is None:
+        raise HTTPException(status_code=404, detail=f"No enrich job found for tenant {tenant_id}")
+    status = enrich_queue.get_status(job_id)
+    return {"job_id": job_id, **(status or {})}

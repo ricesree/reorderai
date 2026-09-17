@@ -104,7 +104,7 @@ class DetectOrderRepository:
         sch = q_ident(self.schema)
         vid = int(vendor_id)
 
-        # Preferred: product_vendor link (has lead_time_days)
+        # Preferred: product_vendor link
         df = self._conn().read_sql(
             f"""
             SELECT
@@ -112,7 +112,6 @@ class DetectOrderRepository:
               p.sku,
               p.name AS description,
               pv.vendor_id,
-              pv.lead_time_days,
               COALESCE(pv.price, p.purchase_price, p.price) AS vendor_price,
               COALESCE(p.min_reorder_quantity, 1) AS box_qty,
               COALESCE(p.min_on_hand, 0) AS product_min_on_hand,
@@ -144,7 +143,6 @@ class DetectOrderRepository:
                   p.sku,
                   p.name AS description,
                   vo.vendor_id,
-                  NULL::integer AS lead_time_days,
                   COALESCE(p.purchase_price, p.price) AS vendor_price,
                   COALESCE(p.min_reorder_quantity, 1) AS box_qty,
                   COALESCE(p.min_on_hand, 0) AS product_min_on_hand,
@@ -193,9 +191,6 @@ class DetectOrderRepository:
                     "box_qty": max(int(r.box_qty or 1), 1),
                     "expiration_days_remaining": expiry_map.get(iid),
                     "last_pallet_qty": pallet_map.get(iid),
-                    "lead_time_days": int(r.lead_time_days)
-                    if r.lead_time_days is not None
-                    else None,
                     "catalog_source": source,
                     "wecomm_min_on_hand": wecomm_min if wecomm_min > 0 else 0.0,
                     "wecomm_max_on_hand": wecomm_max if wecomm_max > 0 else 0.0,

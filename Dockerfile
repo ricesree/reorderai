@@ -19,6 +19,7 @@ COPY config ./config
 COPY core ./core
 COPY database ./database
 COPY v2 ./v2
+COPY invoice_agent ./invoice_agent
 COPY data/forecast_store ./data/forecast_store
 
 EXPOSE 8000

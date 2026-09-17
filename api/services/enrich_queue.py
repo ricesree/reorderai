@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 _QUEUE: queue.Queue = queue.Queue()
 _JOBS: dict[str, dict[str, Any]] = {}
 _ACTIVE_TENANTS: dict[str | None, str] = {}  # tenant_id -> job_id currently queued/running
+_LAST_JOB_BY_TENANT: dict[str | None, str] = {}  # tenant_id -> most recent job_id (active or finished)
 _lock = threading.Lock()
 
 
@@ -52,6 +53,7 @@ def enqueue(tenant_id: str | None, limit: int | None) -> tuple[str, bool]:
             return existing, False
         job_id = uuid.uuid4().hex
         _ACTIVE_TENANTS[tenant_id] = job_id
+        _LAST_JOB_BY_TENANT[tenant_id] = job_id
     _JOBS[job_id] = {"status": "queued"}
     _QUEUE.put((job_id, tenant_id, limit))
     return job_id, True
@@ -59,3 +61,7 @@ def enqueue(tenant_id: str | None, limit: int | None) -> tuple[str, bool]:
 
 def get_status(job_id: str) -> dict[str, Any] | None:
     return _JOBS.get(job_id)
+
+
+def get_last_job_id(tenant_id: str | None) -> str | None:
+    return _LAST_JOB_BY_TENANT.get(tenant_id)

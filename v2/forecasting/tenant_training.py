@@ -38,9 +38,12 @@ def schema_for_tenant(tenant_id: str) -> str:
     return tid if tid.startswith("wecomm_") else f"wecomm_{tid}"
 
 
-def _is_perishable(category_name: str | None) -> int:
-    name = (category_name or "").lower()
-    return int(any(kw in name for kw in PERISHABLE_KEYWORDS))
+def _is_perishable(category_name: Any) -> int:
+    """category_name is NaN (a float), not None, for products with no category
+    (LEFT JOIN -> NULL -> pandas NaN) — `nan or ""` doesn't catch that, NaN is truthy."""
+    if pd.isna(category_name):
+        return 0
+    return int(any(kw in str(category_name).lower() for kw in PERISHABLE_KEYWORDS))
 
 
 def fetch_tenant_daily_sales(

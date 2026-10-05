@@ -150,7 +150,8 @@ def _fit_model(sales: pd.DataFrame) -> dict[str, Any]:
     frame["category_id"] = pd.Categorical(frame["category_id"].astype(str), categories=category_categories)
 
     model = lgb.LGBMRegressor(
-        objective="regression",
+        objective="tweedie",
+        tweedie_variance_power=1.3,
         n_estimators=300,
         learning_rate=0.05,
         num_leaves=31,

@@ -38,6 +38,13 @@ from v2.forecasting.global_lightgbm_predictor import (
 from v2.products.same_item_brands import build_other_brands_map, build_same_product_name_map
 
 
+# ponytail: fixed cutoff, not learned/calibrated — fewer selling days than this
+# (out of the ~120d sales_history lookback) routes to Croston/TSB instead of the
+# tenant LightGBM. Revisit with a proper Syntetos-Boylan ADI/CV^2 classification
+# if this simple count proves too coarse in practice.
+SPARSE_SELLING_DAYS_THRESHOLD = 10
+
+
 def _ads_lookback_days() -> float:
     try:
         return max(float(os.getenv("ADS_LOOKBACK_DAYS", "90")), 1.0)
@@ -413,22 +420,24 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
         tenant_item_series: list[dict[str, Any]] | None = None
         tenant_forecast_label: str | None = None
         if tenant_model_ready:
-            dc = str(demand_class or "").lower()
-            if dc == "smooth":
+            # Route on actual selling-day count from this request's own sales_history,
+            # not the external demand_class — that field comes from a nightly batch
+            # classification that isn't reliably scoped to this tenant (confirmed: it
+            # labeled a 3-sale-day item "smooth"), so it can't be trusted for routing.
+            item_history = sales_history.get(item_id, [])
+            if len(item_history) >= SPARSE_SELLING_DAYS_THRESHOLD:
                 tenant_item_series = tsm.predict_item_days(
                     tenant_id=store.schema,
                     item_id=item_id,
-                    history=sales_history.get(item_id, []),
+                    history=item_history,
                     attrs=tenant_attrs.get(item_id, {}),
                     as_of=as_of,
                     horizon_days=x_days,
                 )
                 if tenant_item_series:
                     tenant_forecast_label = "tenant_lightgbm"
-            elif dc in ("intermittent", "lumpy", "erratic"):
-                tenant_item_series = _sparse_forecast_series(
-                    item_id, sales_history.get(item_id, []), as_of, x_days
-                )
+            else:
+                tenant_item_series = _sparse_forecast_series(item_id, item_history, as_of, x_days)
                 tenant_forecast_label = "tenant_croston_tsb"
             if tenant_forecast_label:
                 tenant_route_counts[tenant_forecast_label] += 1

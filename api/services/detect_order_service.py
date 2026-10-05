@@ -92,6 +92,47 @@ def _forecast_series(
     ]
 
 
+def _history_to_zero_filled_series(history: list[dict[str, Any]], *, as_of: date, lookback_days: int = 120):
+    import pandas as pd
+
+    end = pd.Timestamp(as_of)
+    start = end - pd.Timedelta(days=lookback_days - 1)
+    series = pd.Series(0.0, index=pd.date_range(start, end, freq="D"), dtype=float)
+    for row in history or []:
+        d = pd.to_datetime(row.get("date"), errors="coerce")
+        if pd.isna(d):
+            continue
+        d = d.normalize()
+        if d in series.index:
+            series.loc[d] = float(row.get("qty") or 0.0)
+    return series
+
+
+def _sparse_forecast_series(
+    item_id: str, history: list[dict[str, Any]], as_of: date, horizon_days: int
+) -> list[dict[str, Any]]:
+    """Croston/TSB for intermittent/lumpy/erratic items — fit live, no training step.
+
+    TSB gives one P50 for the whole horizon, not a daily curve (these items
+    don't have a reliable day-by-day shape anyway), so it's spread flat across
+    the horizon rather than faking a precise-looking curve.
+    """
+    from v2.forecasting.croston import fit_tsb
+    from v2.forecasting.monte_carlo import simulate_horizon_demand
+
+    horizon = max(int(horizon_days), 1)
+    dates = [as_of + timedelta(days=i + 1) for i in range(horizon)]
+    series = _history_to_zero_filled_series(history, as_of=as_of)
+    if series.sum() <= 0:
+        return [{"date": d.isoformat(), "qty": 0.0} for d in dates]
+
+    fitted = fit_tsb(series)
+    seed = abs(hash(str(item_id))) % (2**31)
+    p50, _p90 = simulate_horizon_demand(series, fitted, horizon_days=horizon, seed=seed)
+    per_day = round(max(float(p50), 0.0) / horizon, 4)
+    return [{"date": d.isoformat(), "qty": per_day} for d in dates]
+
+
 def _vendors(repo: DetectOrderRepository) -> list[VendorInfo]:
     return [
         VendorInfo(vendor_id=str(v["vendor_id"]), vendor_name=str(v["vendor_name"]))
@@ -299,38 +340,37 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
     # global model when it's ready for this tenant — same lgbm_series display
     # slot, just a different, tenant-specific source. Order math is untouched;
     # this only changes what sales_series.forecast / forecast_source show.
-    tenant_lgbm_by_item: dict[str, list[dict[str, Any]]] = {}
+    #
+    # Routing by demand_class (resolved per-item in the loop below): smooth
+    # items go through the pooled tenant LightGBM; intermittent/lumpy/erratic
+    # items go through Croston/TSB fit live on their own history instead —
+    # a pooled regression tree collapses toward zero on mostly-zero targets
+    # (recursive forecasting compounds that), while Croston/TSB is built for
+    # exactly this demand shape and needs no training step at all.
+    tenant_model_ready = False
+    tenant_attrs: dict[str, dict[str, Any]] = {}
+    tsm = None
     if os.getenv("DB_HOST"):
         try:
-            from v2.forecasting import tenant_sales_model as tsm
+            from v2.forecasting import tenant_sales_model as _tsm
             from v2.forecasting.tenant_training import fetch_product_attrs as fetch_tenant_product_attrs
 
+            tsm = _tsm
             tsm.ensure_tenant_model(store.schema)
-            allowed, reason = tsm.can_predict(store.schema)
-            if allowed:
+            tenant_model_ready, reason = tsm.can_predict(store.schema)
+            if tenant_model_ready:
                 tenant_attrs = fetch_tenant_product_attrs(store.schema, item_ids)
-                for iid in item_ids:
-                    series = tsm.predict_item_days(
-                        tenant_id=store.schema,
-                        item_id=iid,
-                        history=sales_history.get(iid, []),
-                        attrs=tenant_attrs.get(iid, {}),
-                        as_of=as_of,
-                        horizon_days=x_days,
-                    )
-                    if series:
-                        tenant_lgbm_by_item[iid] = series
-                logging.getLogger(__name__).info(
-                    "tenant %s: forecast ready for %d/%d items", store.schema, len(tenant_lgbm_by_item), len(item_ids)
-                )
             else:
                 logging.getLogger(__name__).info(
-                    "tenant %s: tenant model forecast unavailable (%s) — using global/ADS fallback",
+                    "tenant %s: tenant model unavailable (%s) — using global/ADS fallback for all items",
                     store.schema, reason,
                 )
         except Exception:
             # Additive enhancement only — a DB hiccup here must not break detect-order.
-            logging.getLogger(__name__).exception("tenant sales model forecast failed; falling back")
+            logging.getLogger(__name__).exception("tenant sales model setup failed; falling back")
+            tenant_model_ready = False
+
+    tenant_route_counts = {"tenant_lightgbm": 0, "tenant_croston_tsb": 0}
 
     fest_rows = festivals_in_horizon(x_days, as_of=as_of)
     upcoming_festivals = format_festivals_for_display(fest_rows)
@@ -369,6 +409,29 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
         )
         if demand_class is None and fc.get("demand_class"):
             demand_class = fc.get("demand_class")
+
+        tenant_item_series: list[dict[str, Any]] | None = None
+        tenant_forecast_label: str | None = None
+        if tenant_model_ready:
+            dc = str(demand_class or "").lower()
+            if dc == "smooth":
+                tenant_item_series = tsm.predict_item_days(
+                    tenant_id=store.schema,
+                    item_id=item_id,
+                    history=sales_history.get(item_id, []),
+                    attrs=tenant_attrs.get(item_id, {}),
+                    as_of=as_of,
+                    horizon_days=x_days,
+                )
+                if tenant_item_series:
+                    tenant_forecast_label = "tenant_lightgbm"
+            elif dc in ("intermittent", "lumpy", "erratic"):
+                tenant_item_series = _sparse_forecast_series(
+                    item_id, sales_history.get(item_id, []), as_of, x_days
+                )
+                tenant_forecast_label = "tenant_croston_tsb"
+            if tenant_forecast_label:
+                tenant_route_counts[tenant_forecast_label] += 1
 
         st = demand_stats.get(item_id) or {}
         # Live 90d ADS wins. Never let batch P50 invent a fake daily rate.
@@ -526,13 +589,13 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
                     x_days,
                     as_of,
                     uplift_types,
-                    lgbm_series=tenant_lgbm_by_item.get(item_id) or lgbm_by_item.get(item_id),
+                    lgbm_series=tenant_item_series or lgbm_by_item.get(item_id),
                 ),
             ),
             demand_class=str(demand_class) if demand_class else None,
             forecast_source=(
-                "tenant_lightgbm"
-                if item_id in tenant_lgbm_by_item
+                tenant_forecast_label
+                if tenant_forecast_label
                 else "global_lightgbm"
                 if item_id in lgbm_by_item
                 else str(fc.get("source") or "")
@@ -592,6 +655,13 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             item, lead=lead, cover=cover, as_of=as_of_s
         )
         lines.append(item)
+
+    if tenant_model_ready:
+        logging.getLogger(__name__).info(
+            "tenant %s: lightgbm=%d croston/tsb=%d of %d items",
+            store.schema, tenant_route_counts["tenant_lightgbm"],
+            tenant_route_counts["tenant_croston_tsb"], len(item_ids),
+        )
 
     # Sort: stockout/critical first, then ORDER qty desc, then WATCH
     _urg_rank = {

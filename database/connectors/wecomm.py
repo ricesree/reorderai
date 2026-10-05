@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
+import os
 from typing import Any
 
 import pandas as pd
@@ -13,12 +15,54 @@ from config.settings import DatabaseSettings, get_settings
 
 logger = logging.getLogger(__name__)
 
+_tunnel: Any | None = None  # process-wide singleton — one tunnel, reused by every connector
+
+
+def _tunnel_enabled() -> bool:
+    return os.getenv("USE_SSH_TUNNEL", "false").strip().lower() in {"1", "true", "yes"}
+
+
+def _get_tunnel(remote_host: str, remote_port: int) -> Any | None:
+    """Lazily start (once per process) an SSH tunnel to (remote_host, remote_port)."""
+    global _tunnel
+    if not _tunnel_enabled():
+        return None
+    if _tunnel is not None:
+        return _tunnel
+    from sshtunnel import SSHTunnelForwarder
+
+    ssh_host = os.getenv("SSH_HOST", "")
+    ssh_port = int(os.getenv("SSH_PORT", "22"))
+    ssh_user = os.getenv("SSH_USER", "")
+    ssh_pkey = os.getenv("SSH_PKEY_PATH", "")
+    if not ssh_host or not ssh_user or not ssh_pkey:
+        raise RuntimeError(
+            "USE_SSH_TUNNEL=1 but SSH_HOST/SSH_USER/SSH_PKEY_PATH are not all set"
+        )
+    tunnel = SSHTunnelForwarder(
+        (ssh_host, ssh_port),
+        ssh_username=ssh_user,
+        ssh_pkey=ssh_pkey,
+        remote_bind_address=(remote_host, remote_port),
+        local_bind_address=("127.0.0.1", 0),
+    )
+    tunnel.start()
+    atexit.register(tunnel.stop)
+    logger.info(
+        "SSH tunnel up: 127.0.0.1:%s -> %s via %s", tunnel.local_bind_port, remote_host, ssh_host
+    )
+    _tunnel = tunnel
+    return _tunnel
+
 
 class WecommDatabaseConnector:
     """
     Shared connector for Wecomm Postgres.
 
-    Locally: DB_HOST=127.0.0.1 DB_PORT=5433 (SSH tunnel).
+    Locally: DB_HOST=127.0.0.1 DB_PORT=5433 (SSH tunnel started externally), or
+    USE_SSH_TUNNEL=1 with SSH_HOST/SSH_PORT/SSH_USER/SSH_PKEY_PATH set, in which
+    case this connector opens the tunnel itself and DB_HOST/DB_PORT are the
+    Postgres host/port as reached from the SSH server's side.
     Password is passed through SQLAlchemy URL.create (not hand-encoded).
     """
 
@@ -31,6 +75,9 @@ class WecommDatabaseConnector:
     def engine(self) -> Engine:
         if self._engine is None:
             url = self._settings.sqlalchemy_url_obj()
+            tunnel = _get_tunnel(self._settings.host, self._settings.port)
+            if tunnel is not None:
+                url = url.set(host="127.0.0.1", port=tunnel.local_bind_port)
             self._engine = create_engine(
                 url,
                 pool_pre_ping=True,

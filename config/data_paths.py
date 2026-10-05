@@ -44,3 +44,4 @@ CACHE_DIR = DATA_ROOT / "cache"
 ORDER_RUNS_DIR = CACHE_DIR / "order_runs"
 FORECAST_STORE_DIR = DATA_ROOT / "forecast_store"
 WEATHER_CACHE_DIR = CACHE_DIR
+TENANT_MODELS_DIR = DATA_ROOT / "models" / "tenants"

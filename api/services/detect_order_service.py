@@ -8,6 +8,7 @@ Select vendor + L + C → for each SKU:
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import date, timedelta
 from typing import Any
@@ -293,6 +294,44 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             as_of=as_of,
             horizon_days=x_days,
         )
+
+    # Per-tenant model (trains inline if stale/missing) takes priority over the
+    # global model when it's ready for this tenant — same lgbm_series display
+    # slot, just a different, tenant-specific source. Order math is untouched;
+    # this only changes what sales_series.forecast / forecast_source show.
+    tenant_lgbm_by_item: dict[str, list[dict[str, Any]]] = {}
+    if os.getenv("DB_HOST"):
+        try:
+            from v2.forecasting import tenant_sales_model as tsm
+            from v2.forecasting.tenant_training import fetch_product_attrs as fetch_tenant_product_attrs
+
+            tsm.ensure_tenant_model(store.schema)
+            allowed, reason = tsm.can_predict(store.schema)
+            if allowed:
+                tenant_attrs = fetch_tenant_product_attrs(store.schema, item_ids)
+                for iid in item_ids:
+                    series = tsm.predict_item_days(
+                        tenant_id=store.schema,
+                        item_id=iid,
+                        history=sales_history.get(iid, []),
+                        attrs=tenant_attrs.get(iid, {}),
+                        as_of=as_of,
+                        horizon_days=x_days,
+                    )
+                    if series:
+                        tenant_lgbm_by_item[iid] = series
+                logging.getLogger(__name__).info(
+                    "tenant %s: forecast ready for %d/%d items", store.schema, len(tenant_lgbm_by_item), len(item_ids)
+                )
+            else:
+                logging.getLogger(__name__).info(
+                    "tenant %s: tenant model forecast unavailable (%s) — using global/ADS fallback",
+                    store.schema, reason,
+                )
+        except Exception:
+            # Additive enhancement only — a DB hiccup here must not break detect-order.
+            logging.getLogger(__name__).exception("tenant sales model forecast failed; falling back")
+
     fest_rows = festivals_in_horizon(x_days, as_of=as_of)
     upcoming_festivals = format_festivals_for_display(fest_rows)
     weekend_row = next((r for r in fest_rows if r.get("name") == "weekend"), None)
@@ -487,12 +526,14 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
                     x_days,
                     as_of,
                     uplift_types,
-                    lgbm_series=lgbm_by_item.get(item_id),
+                    lgbm_series=tenant_lgbm_by_item.get(item_id) or lgbm_by_item.get(item_id),
                 ),
             ),
             demand_class=str(demand_class) if demand_class else None,
             forecast_source=(
-                "global_lightgbm"
+                "tenant_lightgbm"
+                if item_id in tenant_lgbm_by_item
+                else "global_lightgbm"
                 if item_id in lgbm_by_item
                 else str(fc.get("source") or "")
             ),

@@ -93,6 +93,14 @@ class SalesSeries(BaseModel):
     )
 
 
+class WindowTotalForecast(BaseModel):
+    horizon_days: int
+    p50_total: float
+    p90_total: float
+    model: str = "horizon_total_lgbm"
+    trained_at: str | None = None
+
+
 class DetectOrderItem(BaseModel):
     item_id: str
     upc: str | None = None
@@ -136,6 +144,13 @@ class DetectOrderItem(BaseModel):
 
     demand_class: str | None = None
     forecast_source: str | None = None
+    window_total_forecast: WindowTotalForecast | None = Field(
+        None,
+        description=(
+            "Parallel model: predicted total units sold over the next X days "
+            "(shadow output, not used in order math)"
+        ),
+    )
 
     # Stock (raw Wecomm OH — negatives kept; order math floors at 0)
     available_stock: float

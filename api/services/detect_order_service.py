@@ -377,6 +377,31 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
             logging.getLogger(__name__).exception("tenant sales model setup failed; falling back")
             tenant_model_ready = False
 
+    # Parallel window-total model (shadow): one P50/P90 total per item for the
+    # next X days, added as window_total_forecast. Never feeds order math, and
+    # any failure here just leaves the key null.
+    window_totals: dict[str, dict[str, Any]] = {}
+    if os.getenv("DB_HOST") and os.getenv("HORIZON_MODEL_ENABLED", "1").lower() in {"1", "true", "yes"}:
+        try:
+            from v2.forecasting import horizon_total_model as hm
+
+            hm.ensure_horizon_model(store.schema)
+            if hm.can_predict(store.schema)[0]:
+                window_totals = hm.predict_window_totals(
+                    store.schema,
+                    item_ids,
+                    as_of=as_of,
+                    horizon_days=x_days,
+                    attrs=tenant_attrs or None,
+                )
+            logging.getLogger(__name__).info(
+                "tenant %s: horizon model predicted %d/%d items",
+                store.schema, len(window_totals), len(item_ids),
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("horizon total model failed; key left null")
+            window_totals = {}
+
     tenant_route_counts = {"tenant_lightgbm": 0, "tenant_croston_tsb": 0}
 
     fest_rows = festivals_in_horizon(x_days, as_of=as_of)
@@ -609,6 +634,7 @@ def detect_order(req: DetectOrderRequest) -> DetectOrderResponse:
                 if item_id in lgbm_by_item
                 else str(fc.get("source") or "")
             ),
+            window_total_forecast=window_totals.get(item_id),
             available_stock=raw_on_hand,
             last_pallet_qty=float(last_pallet) if last_pallet is not None else None,
             expiration_days_remaining=exp_days_f,

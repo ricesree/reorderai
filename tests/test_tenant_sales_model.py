@@ -152,6 +152,35 @@ def test_ensure_tenant_model_concurrent_requests_train_once(tmp_path, monkeypatc
     assert sum(1 for r in results if r["status"] == "skipped_fresh") == 4
 
 
+def test_blob_storage_round_trip(tmp_path, monkeypatch):
+    """With a connection string set, train/save/load goes through Blob, not local disk."""
+    from azure.core.exceptions import ResourceNotFoundError
+
+    from v2.forecasting import model_storage
+
+    blobs: dict[str, bytes] = {}
+
+    class _FakeContainer:
+        def upload_blob(self, key, data, overwrite):
+            blobs[key] = data
+
+        def download_blob(self, key):
+            if key not in blobs:
+                raise ResourceNotFoundError("missing")
+            return type("D", (), {"readall": lambda self: blobs[key]})()
+
+    monkeypatch.setenv("AZURE_STORAGE_CONNECTION_STRING", "fake")
+    monkeypatch.setattr(model_storage, "_container", lambda: _FakeContainer())
+    monkeypatch.setattr(tsm, "TENANT_MODELS_DIR", tmp_path)
+    monkeypatch.setattr(tsm, "_fetch_training_sales", lambda tenant_id: _synthetic_daily_sales())
+
+    assert tsm.ensure_tenant_model("tenant_b")["status"] == "trained"
+    assert set(blobs) == {"tenants/tenant_b/model.joblib", "tenants/tenant_b/meta.json"}
+    assert not any(tmp_path.iterdir())  # nothing written locally
+    assert tsm.can_predict("tenant_b") == (True, "ok")
+    assert tsm.load_model("tenant_b") is tsm.load_model("tenant_b")  # cached, one download
+
+
 def test_ensure_tenant_model_skips_when_fresh(tmp_path, monkeypatch):
     monkeypatch.setattr(tsm, "TENANT_MODELS_DIR", tmp_path)
     calls = {"n": 0}

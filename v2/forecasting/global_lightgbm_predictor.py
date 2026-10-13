@@ -6,6 +6,7 @@ daily qty for the upcoming order window (sales_series.forecast).
 
 from __future__ import annotations
 
+import io
 import os
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -17,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from config.data_paths import PROJECT_ROOT
+from v2.forecasting import model_storage
 
 DEFAULT_MODEL_PATH = PROJECT_ROOT / "models" / "global_lightgbm_sales_model.joblib"
 # Need lag_56 + rolling_56 → keep at least this many history days
@@ -45,14 +47,14 @@ class _Bundle:
 @lru_cache(maxsize=1)
 def _load_bundle() -> _Bundle | None:
     path = model_path()
-    if not path.exists():
-        return None
     try:
         import joblib
-    except ImportError:
-        return None
-    try:
-        obj = joblib.load(path)
+
+        # Blob key global/<filename> when AZURE_STORAGE_CONNECTION_STRING is set, else local path
+        raw = model_storage.read_bytes(f"global/{path.name}", path)
+        if raw is None:
+            return None
+        obj = joblib.load(io.BytesIO(raw))
     except Exception:
         return None
     if not isinstance(obj, dict) or "model" not in obj:

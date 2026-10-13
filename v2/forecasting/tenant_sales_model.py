@@ -1,6 +1,7 @@
 """Per-tenant sales prediction model: storage, staleness gate, 60-day history gate.
 
-One model per tenant schema under data/models/tenants/<schema>/:
+One model per tenant schema, in Azure Blob (tenants/<schema>/...) when
+AZURE_STORAGE_CONNECTION_STRING is set, else data/models/tenants/<schema>/:
   model.joblib - trained model
   meta.json    - {status, trained_at, history_days, rows, min_history_days_required}
 
@@ -10,6 +11,7 @@ discarded (never written to disk/DB) - see _fetch_training_sales().
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -22,6 +24,7 @@ from typing import Any
 import pandas as pd
 
 from config.data_paths import TENANT_MODELS_DIR
+from v2.forecasting import model_storage
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,12 @@ RETRAIN_AFTER_HOURS = int(os.getenv("FORECAST_MODEL_RETRAIN_HOURS", "24"))
 
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
+
+# predict_item_days runs once per SKU — keep loaded bundles in memory so Blob
+# isn't downloaded per item. Keyed by local path; dropped when this process retrains.
+# ponytail: a retrain on another instance isn't seen until restart; add an
+# ETag/trained_at check here if the API is scaled out.
+_model_cache: dict[str, Any] = {}
 
 
 def _lock_for(tenant_id: str) -> threading.Lock:
@@ -52,19 +61,21 @@ def _meta_path(tenant_id: str) -> Path:
     return _tenant_dir(tenant_id) / "meta.json"
 
 
+def _blob_key(tenant_id: str, name: str) -> str:
+    return f"tenants/{tenant_id}/{name}"
+
+
 def load_meta(tenant_id: str) -> dict[str, Any] | None:
-    path = _meta_path(tenant_id)
-    if not path.exists():
-        return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        raw = model_storage.read_bytes(_blob_key(tenant_id, "meta.json"), _meta_path(tenant_id))
+        return None if raw is None else json.loads(raw.decode("utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
 
 
 def _save_meta(tenant_id: str, meta: dict[str, Any]) -> None:
-    _tenant_dir(tenant_id).mkdir(parents=True, exist_ok=True)
-    _meta_path(tenant_id).write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    data = json.dumps(meta, indent=2).encode("utf-8")
+    model_storage.write_bytes(_blob_key(tenant_id, "meta.json"), _meta_path(tenant_id), data)
 
 
 def is_stale(tenant_id: str) -> bool:
@@ -106,13 +117,27 @@ def can_predict(tenant_id: str) -> tuple[bool, str]:
 
 def load_model(tenant_id: str) -> Any | None:
     path = _model_path(tenant_id)
-    if not path.exists():
-        logger.debug("tenant %s: no model on disk at %s", tenant_id, path)
+    if str(path) in _model_cache:
+        return _model_cache[str(path)]
+    raw = model_storage.read_bytes(_blob_key(tenant_id, "model.joblib"), path)
+    if raw is None:
+        logger.debug("tenant %s: no model stored", tenant_id)
         return None
     import joblib
 
-    logger.debug("tenant %s: loading model from %s", tenant_id, path)
-    return joblib.load(path)
+    logger.debug("tenant %s: loaded model (%d bytes)", tenant_id, len(raw))
+    bundle = joblib.load(io.BytesIO(raw))
+    _model_cache[str(path)] = bundle
+    return bundle
+
+
+def _save_model(tenant_id: str, bundle: dict[str, Any]) -> None:
+    import joblib
+
+    buf = io.BytesIO()
+    joblib.dump(bundle, buf)
+    model_storage.write_bytes(_blob_key(tenant_id, "model.joblib"), _model_path(tenant_id), buf.getvalue())
+    _model_cache.pop(str(_model_path(tenant_id)), None)
 
 
 # --- Training data fetch / model fit ---
@@ -214,10 +239,8 @@ def ensure_tenant_model(tenant_id: str) -> dict[str, Any]:
         logger.info("tenant %s: training model...", tenant_id)
         t1 = time.monotonic()
         bundle = _fit_model(sales)
-        import joblib
-
-        _tenant_dir(tenant_id).mkdir(parents=True, exist_ok=True)
-        joblib.dump(bundle, _model_path(tenant_id))
+        # Model before meta: a failed upload never leaves meta saying "trained" without a model.
+        _save_model(tenant_id, bundle)
         logger.info(
             "tenant %s: trained and saved model (%d products, %.1fs)",
             tenant_id, len(bundle.get("product_categories") or []), time.monotonic() - t1,

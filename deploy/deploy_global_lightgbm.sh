@@ -20,14 +20,19 @@ else
   echo "==> (not a git repo — skipping pull; ensure files are already copied)"
 fi
 
-if [[ ! -f "$MODEL_REL" ]]; then
+if grep -qE '^AZURE_STORAGE_CONNECTION_STRING=.+' "$APP_DIR/.env" 2>/dev/null; then
+  echo "==> Blob storage configured — model loads from container blob global/$(basename "$MODEL_REL")"
+  echo "    Upload it first, e.g. from your laptop:"
+  echo "      az storage blob upload --connection-string \"\$AZURE_STORAGE_CONNECTION_STRING\" \\"
+  echo "        -c models -n global/global_lightgbm_sales_model.joblib -f $MODEL_REL --overwrite"
+elif [[ ! -f "$MODEL_REL" ]]; then
   echo "ERROR: missing $APP_DIR/$MODEL_REL"
   echo "Copy it first, e.g. from your laptop:"
   echo "  scp models/global_lightgbm_sales_model.joblib USER@VM:/opt/reorder-ai/models/"
   exit 1
+else
+  echo "==> Model present: $(du -h "$MODEL_REL" | awk '{print $1}')"
 fi
-
-echo "==> Model present: $(du -h "$MODEL_REL" | awk '{print $1}')"
 
 VENV_PIP=""
 if [[ -x "$APP_DIR/.venv/bin/pip" ]]; then
@@ -37,8 +42,8 @@ elif [[ -x "$APP_DIR/venv/bin/pip" ]]; then
 fi
 
 if [[ -n "$VENV_PIP" ]]; then
-  echo "==> pip install joblib scikit-learn lightgbm"
-  "$VENV_PIP" install -q 'joblib>=1.3.0' 'scikit-learn>=1.3.0' 'lightgbm>=4.0.0'
+  echo "==> pip install joblib scikit-learn lightgbm azure-storage-blob"
+  "$VENV_PIP" install -q 'joblib>=1.3.0' 'scikit-learn>=1.3.0' 'lightgbm>=4.0.0' 'azure-storage-blob>=12.19.0'
 else
   echo "==> (no .venv found — skip pip; install joblib manually if needed)"
 fi
@@ -58,12 +63,13 @@ fi
 
 echo "==> smoke-load model"
 python3 - <<'PY'
-from pathlib import Path
 import sys
 sys.path.insert(0, ".")
+from dotenv import load_dotenv
+load_dotenv(".env", override=True)
+from v2.forecasting import model_storage
 from v2.forecasting.global_lightgbm_predictor import model_ready, model_path
-print("model_path", model_path())
-print("exists", Path(model_path()).exists())
+print("model_path", model_path(), "(blob)" if model_storage.blob_enabled() else "(local)")
 print("model_ready", model_ready())
 if not model_ready():
     raise SystemExit("model failed to load")
